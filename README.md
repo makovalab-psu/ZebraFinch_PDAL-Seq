@@ -1,4 +1,61 @@
+# Overview
 
+Code for JPSieg's analysis of Zebra finch cell line PDAL-Seq data (notebook page number).
+
+Contains final plots and a Snakemake pipeline in "workflow".
+
+Ran in five phases:
+
+Phase 1: Data preprocessing and correlation
+
+Phase 2: Merge replicates, construct blacklist, and examine correspondence to non-B DNA motifs
+
+Phase 3: Choose optimum HMM states
+
+Phase 4: PDAL-Seq HMM correspondence to genome function
+
+Phase 5: PDAL-Seq read enrichment in repeats
+
+The "workflow/" directory contains conda environments in "env", rules for each step in "rules", scripts for each step in "scripts", and the overall workflow configuration in "Snakefile".
+
+Requires large "resources" and "data/raw_reads/" directories. Contact authors for access. Will create large intermediate "data" and "results" folders, along with smaller "logs" and "benchmarks". Requires 648G of total space following implementation. Recommend 1 TB disk total for intermediate files.
+
+To run:
+
+1. Place "resources" and "data/raw_reads/" in a directory.
+2. Install the driver environment
+
+```bash
+module load anaconda
+mamba env create -f workflow/env/snakemake.yml
+mamba activate js4025_snakemake
+```
+4. Test the dag:
+
+```bash
+snakemake --snakefile workflow/Snakefile -n --cores 20 --use-conda
+```
+
+5. Implement the workflow directly
+
+```bash
+snakemake \
+    --snakefile workflow/Snakefile \
+    --cores "${CORES}" \
+    --use-conda \
+    --resources mem_mb="${MEM_MB}" \
+    --rerun-incomplete \
+    --printshellcmds \
+    --keep-goingh
+```
+
+Or modify the submit slurm scripts to submit batch jobs on your sever. Example:
+
+```bash
+mkdir -p slurm_logs && sbatch submit_phase1.sh
+```
+
+See my step by step configuration and implementation below:
 
 # 01 Upload and check data
 
