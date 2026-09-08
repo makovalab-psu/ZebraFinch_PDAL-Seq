@@ -1,0 +1,23 @@
+# Shell-rule environment for Phase 5: splitting the repeat annotations into
+# per-class BED files and the interval arithmetic behind the read enrichment.
+#
+# bedtools and megadepth versions match phase1_preprocess.yml, so the coverage
+# sums computed here are directly comparable to the window coverage Phase 1
+# computed and to the bigWig tracks Phase 1 wrote.
+#
+# python is named explicitly. split_repeats.py writes one BED per repeat class
+# -- up to 54 open output files from one input -- and the pipeline convention
+# is that awk never does that (BSD awk silently drops output files under
+# parallel jobs). The bedtools package does not guarantee a python on PATH.
+#
+# NEVER edit this file to add a package for a later phase. Snakemake hashes
+# the file contents, so an edit re-queues every completed job that used it.
+# Create a new single-purpose yml instead.
+name: js4025_phase5_repeats
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - bedtools=2.31.1
+  - megadepth

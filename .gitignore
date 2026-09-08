@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# RStudio
+.Rproj.user/
+js4025_Analyze_Zebra_finch_PDAL-Seq_data.Rproj
+
+# Snakemake
+.snakemake/
+benchmarks/
+
+# Logs & cluster output
+logs/
+slurm_logs/
+slurm-*.out
+
+# Data & pipeline resources
+data/
+resources/
+results/
+
+# Reports & misc outputs
+multiqc_report_*.html
+test.png
+
+# Sequencing paperwork
+Makova_IlluminaSampleList_7-31-2026.xlsx
+Makova_lluminaSequencingForm_7-31-2026.docx
+
+# Scratch / unused
+.run_phase4.sh.unused
+submit_phase2_including_repetative.sh
+

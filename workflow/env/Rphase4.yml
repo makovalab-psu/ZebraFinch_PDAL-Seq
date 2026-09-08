@@ -1,0 +1,21 @@
+# R environment for the Phase 4 compile and plot rules.
+#
+# Separate from Rplot.yml for one reason: the Figure-3 style composite needs
+# cowplot::plot_grid, and cowplot is not in Rplot.yml. Adding it there would
+# change that file's content hash and snakemake would re-run every completed
+# Phase 1-3 plotting job.
+#
+# ggpubr is here for mean_se / stat_summary, matching the manuscript's
+# Figure_3_Ape_PDAL-Seq_MVGHMM.R.
+#
+# NEVER edit this file to add a package for a later phase -- make another yml.
+name: js4025_Rphase4
+channels:
+  - conda-forge
+dependencies:
+  - r-base=4.4.0
+  - r-tidyverse
+  - r-viridis
+  - r-svglite
+  - r-cowplot
+  - r-ggpubr

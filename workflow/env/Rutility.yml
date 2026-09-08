@@ -1,0 +1,13 @@
+# R environment for compiling statistics and plotting.
+# Matches workflow/env/Rutility.yml in the PDAL-Seq manuscript pipeline.
+#
+# NEVER edit this file to add a package for a later phase -- see the note in
+# phase1_preprocess.yml. Create a new single-purpose yml instead.
+name: js4025_Rutility
+channels:
+  - conda-forge
+dependencies:
+  - r-base=4.4.0
+  - r-tidyverse
+  - r-viridis
+  - r-ggpubr

@@ -1,0 +1,25 @@
+# Shell-rule environment for Phase 4: RNA-Seq mapping and the interval
+# arithmetic behind the state enrichment analysis.
+#
+# STAR is here and bwa is NOT. RNA-Seq reads span splice junctions, so the
+# bwa mem step that 18_ATACseq_analysis.smk uses for ATAC-Seq would soft-clip
+# every junction-spanning read. Everything else in that protocol (fastp
+# flags, samtools rmdup -s) is carried over unchanged.
+#
+# samtools, bedtools and megadepth versions match phase1_preprocess.yml and
+# phase2_nonb.yml, so window coverage computed here is directly comparable to
+# the coverage the HMM was fit to.
+#
+# NEVER edit this file to add a package for a later phase. Snakemake hashes
+# the file contents, so an edit re-queues every completed job that used it.
+# Create a new single-purpose yml instead.
+name: js4025_phase4_functional
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - star=2.7.11b
+  - fastp=0.24.0
+  - samtools=1.21
+  - bedtools=2.31.1
+  - megadepth

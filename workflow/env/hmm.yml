@@ -1,0 +1,20 @@
+# Gaussian HMM segmentation (Phase 3).
+#
+# Version set copied from the PDAL-Seq manuscript's workflow/env/hmm.yml,
+# which is known to solve, with joblib and scikit-learn named explicitly
+# instead of arriving as implicit dependencies of hmmlearn.
+#
+# This file is single purpose and must not be edited to add a package for a
+# later phase: snakemake hashes the file contents, so an edit re-queues
+# every finished job that used it. Write a new yml instead.
+name: js4025_hmm
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.9.21
+  - pandas=2.2.3
+  - numpy=2.0.2
+  - hmmlearn
+  - scikit-learn
+  - joblib

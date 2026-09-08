@@ -1,0 +1,19 @@
+# R environment for the plotting rules only.
+#
+# Split out from Rutility.yml on 2026-09-02. Rutility.yml has no svglite, so
+# ggsave() to a .svg dies with
+#
+#   Error in dev(...): The package "svglite" is required to save as SVG.
+#
+# svglite was NOT added to Rutility.yml because that changes its content hash
+# and snakemake would rerun every completed job that used it
+# (compile_preprocessing_statistics, compile_correlation). Same reason this
+# file must not gain packages for a later phase -- make another yml instead.
+name: js4025_Rplot
+channels:
+  - conda-forge
+dependencies:
+  - r-base=4.4.0
+  - r-tidyverse
+  - r-viridis
+  - r-svglite

@@ -1,0 +1,19 @@
+# Phase 1 shell tools (trim, map, deduplicate, window coverage, bigwig).
+# Versions are pinned to the PDAL-Seq manuscript pipeline
+# (workflow/env/01_preprocess_data.yml and 03_Correlation_...yml) so that
+# alignments and window counts stay directly comparable across projects.
+#
+# NEVER edit this file to add a package for a later phase. Snakemake hashes
+# every env YAML; changing it marks every completed job that used it as stale
+# and re-queues the whole phase. Later phases get their own single-purpose yml.
+name: js4025_phase1_preprocess
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - fastp=0.24.0
+  - bwa=0.7.18
+  - samtools=1.21
+  - bedtools=2.31.1
+  - megadepth
+  - ucsc-bedgraphtobigwig

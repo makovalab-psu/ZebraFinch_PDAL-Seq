@@ -1,0 +1,19 @@
+# Shell-rule environment for Phase 2: BAM merging, non-B annotation
+# cleaning, window coverage and interval arithmetic.
+#
+# Versions match phase1_preprocess.yml so coverage computed in Phase 2 is
+# directly comparable to Phase 1's. This is a SEPARATE file rather than a
+# reuse of phase1_preprocess.yml on purpose: adding or removing a package
+# here can never rehash the Phase 1 environment and rerun mapping.
+#
+# NEVER edit this file to add a package for a later phase. Snakemake hashes
+# the file contents, so an edit re-queues every completed job that used it.
+# Create a new single-purpose yml instead.
+name: js4025_phase2_nonb
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - samtools=1.21
+  - bedtools=2.31.1
+  - megadepth

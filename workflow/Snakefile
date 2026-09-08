@@ -1,0 +1,469 @@
+####################################################################
+# js4025 -- Analyze Zebra finch PDAL-Seq data
+#
+# Adapted from the PDAL-Seq manuscript pipeline
+# (PNAS_revised_version_2/PDALSeq_manuscript), steps 01, 02, 03 and 21.
+#
+# Only forward reads (R1) are used. All samples map to a single
+# haplotype of the bTaeGut7v0.4 T2T assembly.
+#
+# Wildcard lists are hard coded from the sample sheet at parse time, so
+# the whole DAG resolves before any rule runs. There are no checkpoints
+# anywhere in this pipeline.
+####################################################################
+
+import csv
+
+####################################################################
+# Configuration
+####################################################################
+
+# One haplotype extracted by resources/make_PDAL-Seq_fasta.sh:
+# chr1-chr37 + chrW maternal, chrZ paternal, chrMT, 3 rDNA morphs.
+GENOME = "bTaeGut7v0.4_mat_Z_MT_rDNA"
+GENOME_FASTA = "resources/genomes/" + GENOME + ".fa"
+
+# Where the unzipped Illumina fastqs live (see README section 01).
+FASTQ_DIR = "data/raw_reads/fastq"
+
+# Sample metadata. Sequencing_sample is the literal fastq stem.
+# The stdlib csv reader is enough for a six-row sheet, and it keeps pandas
+# out of the driver environment. The R scripts read the same file for the
+# Library / Treatment / Experiment columns.
+with open("Zebrafinch_samples.txt") as handle:
+    SAMPLE_TABLE = list(csv.DictReader(handle, delimiter="\t"))
+SAMPLES = [row["Sequencing_sample"] for row in SAMPLE_TABLE]
+
+# All_reads  = deduplicated, no MAPQ filter (manuscript convention)
+# High_MapQ  = deduplicated and MAPQ >= 20
+MAPQ = ["All_reads", "High_MapQ"]
+
+# Window sizes for signal quantification and correlation, in bp.
+WINDOWS = ["1000000", "100000", "10000"]
+
+# The window size that Phase 2 consumes as its coverage matrix.
+PRIMARY_WINDOW = "10000"
+
+####################################################################
+# Phase 2 configuration
+####################################################################
+
+# Experiment groups come from the Experiment column of the sample sheet.
+# Phase 1 wrote that column but never used it; merging waited until the
+# correlation confirmed the replicates agree, which it did.
+EXPERIMENTS = {}
+for row in SAMPLE_TABLE:
+    EXPERIMENTS.setdefault(row["Experiment"], []).append(row["Sequencing_sample"])
+
+# The combined PDAL-Seq dataset: every permanganate-treated library in one
+# BAM, matching K562_merge_concentrations in manuscript rule 21. 0mM is
+# deliberately left out -- it is the untreated control, not a replicate.
+COMBINED_EXPERIMENT = "Tguttata_CFS414_PDALSeq"
+EXPERIMENTS[COMBINED_EXPERIMENT] = (
+    EXPERIMENTS["Tguttata_CFS414_PDALSeq_20mM"]
+    + EXPERIMENTS["Tguttata_CFS414_PDALSeq_40mM"]
+)
+EXPERIMENT_NAMES = list(EXPERIMENTS)
+
+# The WGS control, used as the blacklist source and as the denominator of
+# the PDAL-Seq/control enrichment ratio.
+WGS_EXPERIMENT = "Tguttata_CFS414_WGS"
+WGS_SAMPLE = EXPERIMENTS[WGS_EXPERIMENT][0]
+
+# Non-B DNA motif classes released for bTaeGut7v0.4 (Zenodo 10.5281/
+# zenodo.19225047). This is SEVEN classes, not the ten in the manuscript:
+# CRU, MR and SLS were not annotated for Zebra finch, and the manuscript's
+# "GQ" is called "G4" here. "all" is the concatenation of the seven.
+NONB = ["APR", "DR", "G4", "IR", "STR", "TRI", "Z"]
+NONB_ALL = NONB + ["all"]
+
+# The annotations were built against the full assembly, so the file stem is
+# bTaeGut7v0.4_MT_rDNA while our genome is the extracted single haplotype
+# bTaeGut7v0.4_mat_Z_MT_rDNA. clean_nonb filters them to the contigs that
+# actually exist in our .fai.
+NONB_PREFIX = "resources/nonB_DNA_annotations/final_nonB/bTaeGut7v0.4_MT_rDNA"
+
+# Blacklist: windows where All_reads coverage exceeds High_MapQ coverage by
+# this factor are unmappable. 1.1 is the manuscript's threshold.
+BLACKLIST_THRESHOLD = "1.1"
+BLACKLIST_WINDOW = "10000"
+
+# Sex chromosomes are blacklisted whole, as the manuscript does for
+# chrX/chrY. The Zebra finch assembly is ZW.
+SEX_CHROMOSOMES = ["chrW_mat", "chrZ_pat"]
+
+# Excluded from every correlation: the sex chromosomes plus the organelle
+# and the three rDNA morphs, which are alternative representations of one
+# locus and therefore guaranteed multi-mappers.
+EXCLUDE_CHROMOSOMES = SEX_CHROMOSOMES + [
+    "chrMT", "rDNA_morph_1", "rDNA_morph_2", "rDNA_morph_3",
+]
+
+####################################################################
+# Phase 2 including repetitive configuration
+#
+# The same comparison as Phase 2, on every window of the genome. Regions
+# are blacklisted BECAUSE they are repetitive and bwa mem scatters their
+# multi-mapping reads across the alternatives rather than discarding
+# them, so the blacklist removes exactly the repeat content the
+# comparison is about. The manuscript's step 04 applies no blacklist
+# either; it first appears at step 09, the HMM.
+#
+# Both of Phase 2's filters become columns rather than decisions, so the
+# thresholds below only pick where the comparison branches are cut, never
+# what the headline figures show. Fractions of a window's bases, not
+# Phase 2's any-overlap boolean: merge_blacklist runs `bedtools merge
+# -d 1`, and on the manuscript's own human blacklist the resulting
+# intervals average 65 kbp, so a boolean drops 93% of 1 Mbp windows while
+# dropping 14% of the sequence.
+REPEAT_LIGHT_FRACTION = "0.05"
+REPEAT_HEAVY_FRACTION = "0.5"
+
+####################################################################
+# Phase 3 configuration
+####################################################################
+
+# The HMM segments in 1 kbp windows. This is deliberately NOT appended to
+# WINDOWS: doing that would re-run Phase 1 coverage for 6 samples x 2 MapQ
+# branches and change the Phase 2 compile outputs. make_genome_windows and
+# experiment_window_coverage both take {size} as a free wildcard, so asking
+# for 1000 here costs one extra windows file and one extra megadepth pass.
+HMM_WINDOW = "1000"
+
+# Emission dimensions of the HMM. The manuscript had four human cell lines
+# and therefore a 4-dimensional Gaussian; we have one cell line, so this is
+# univariate. Every Phase 3 rule and script is written over this list, so
+# adding WGS_EXPERIMENT or the 0 mM library as a second dimension is a change
+# to this line and nothing else.
+HMM_FEATURES = [COMBINED_EXPERIMENT]
+
+# State counts to fit. The manuscript stops at 20; 25 and 30 are added
+# because a single-feature model may want more states than a four-feature one
+# to reach the same description of the signal.
+HMM_STATES = ["2", "3",  "4", "5", "6", "7", "8", "9", "10", "11",  "12", "13", "14", "15",  "16", "18", "20", "25", "30"]
+
+# Applied to the per-bp per-billion signal before z-scoring: "none" (the
+# manuscript's behaviour) or "log1p". PDAL-Seq coverage in 1 kbp windows is
+# zero inflated with a long right tail, so if the Gaussians in
+# plots/phase3/gaussian_fit/ clearly miss the histograms, switch this to
+# "log1p" and re-run. It is a params value, and snakemake treats params as a
+# rerun trigger, so the whole phase re-runs from normalize_hmm_coverage and
+# nothing in Phase 1 or Phase 2 is recomputed.
+HMM_TRANSFORM = "none"
+
+####################################################################
+# Phase 4 configuration
+####################################################################
+
+# Phase 3 fit every one of these; Phase 4 only reads them. The range brackets
+# the elbow of the BIC scree, so the functional analysis is run for each and
+# the choice of k is made from what the states turn out to mean.
+PHASE4_STATES = ["8", "9", "10", "11", "12", "13", "14"]
+
+PHASE3_HMM_DIR = "data/phase3/GHMM"
+STATE_DIR      = "data/phase4/states"
+
+# RNA-Seq from the same CFS414 cell line as the PDAL-Seq libraries, from the
+# cell line publication (PMC8921232): SRR17849680 is passage 50 and
+# SRR17849681 is passage 24. Both are paired, ~460 M pairs each, and unlike
+# the PDAL-Seq libraries BOTH mates are used -- these reads are being counted,
+# not used to locate a nick.
+RNA_SRA = ["SRR17849680", "SRR17849681"]
+RNA_DIR = "resources/RNA-Seq"
+
+# Splice junctions are found de novo. resources/ holds the BED files Linnea
+# derived from the gene annotation but not the GFF itself; to use
+# annotation-guided junctions instead, copy it over
+#
+#   cp /storage/group/kdm16/default/lbs5874/ZebraFinch/ref/bTaeGut7v0.4_MT_rDNA.matZ.gff \
+#      resources/gene_annotation/
+#
+# and set this to that path. At 1 kbp resolution it will not change the
+# enrichments.
+RNA_SEQ_GTF = ""
+
+# fastp --reads_to_process. "0" means all of them. This is the lever if the
+# ~15-20 h of STAR alignment is too long: setting it to e.g. "100000000" caps
+# each library at 100 M pairs, which is still far more depth than a 1 kbp
+# window enrichment needs.
+RNA_SEQ_READ_LIMIT = "0"
+
+RNA_READ_LIMIT_FLAG = (
+    "" if RNA_SEQ_READ_LIMIT in ("", "0")
+    else "--reads_to_process " + RNA_SEQ_READ_LIMIT
+)
+RNA_ANNOTATION_FLAG = ("-a " + RNA_SEQ_GTF) if RNA_SEQ_GTF else ""
+
+STAR_INDEX = "resources/genomes/STAR_index/" + GENOME
+
+
+def rna_annotation_input(wildcards):
+    """The GFF as a tracked input, or nothing when junctions are de novo."""
+    return [RNA_SEQ_GTF] if RNA_SEQ_GTF else []
+
+
+# Functional annotations, copied from Linnea's directory (see resources/README
+# on Roar). All are on the single haplotype -- chr*_mat plus chrZ_pat -- so
+# the contig names already match our genome; clean_annotation.sh only has to
+# drop chrMT / rDNA and clamp to the contig ends.
+ANNOTATION_PREFIX = "resources/gene_annotation/bTaeGut7v0.4_MT_rDNA.matZ"
+CENTROMERE_BED    = "resources/centromere/bTaeGut7v0.4_MT_rDNA.matZ.CEN.bed"
+METHYLATION_BED   = ("resources/methylation_data/"
+                     "bTaeGut7v0.4_MT_rDNA.matZ.PBmethylation.v0.1.bed")
+
+GENE_ANNOTATIONS = ["promoter", "UTR5", "CDS", "introns", "UTR3",
+                    "lncrna", "intergenic"]
+
+# The centromere annotation lives in its own directory and has 41 records --
+# one per chromosome. That is far below the methods' 10,000 threshold, so its
+# significance comes from the empirical null rather than a Wilcoxon test.
+ANNOTATIONS = GENE_ANNOTATIONS + ["CEN"]
+
+# The repeat annotations (EDTA2, Satellites, TRF_withMers) and the A/B
+# compartment track are NOT here. Linnea listed them but resources/README only
+# records the gene annotations and the centromeres being copied, and the
+# satellites are Phase 5's subject.
+
+
+def annotation_source(wildcards):
+    """Where the raw BED for one functional annotation lives."""
+    if wildcards.ann == "CEN":
+        return CENTROMERE_BED
+    return ANNOTATION_PREFIX + "." + wildcards.ann + ".bed"
+
+
+# Enrichment sampling, from the manuscript's rule 07 calls: 10,000 annotations
+# per iteration, 100 iterations. The methods are explicit that 100 is a
+# deliberate ceiling -- "we used 100 iterations of subsampling because
+# considering a larger number of subsamples resulted in all enrichments being
+# significant due to the large size of the datasets."
+ENRICHMENT_SUBSAMPLES = "10000"
+ENRICHMENT_ITERATIONS = "100"
+
+# The manuscript passes 1,000,000 to BG_enrichment.sh against a raw genomecov
+# bedGraph. Ours is the 1 kbp window grid, which has ~1.15 M rows in total, so
+# 1,000,000 would draw ~87% of the data every iteration and leave the null with
+# almost no variance. 100,000 keeps the same ~10% sampling fraction the
+# manuscript had.
+RNA_ENRICHMENT_SUBSAMPLES = "100000"
+
+####################################################################
+# Phase 5 configuration
+####################################################################
+
+# The repeat annotations, copied from Linnea's directory (see resources/README
+# on Roar). Both are already on the single haplotype -- chr*_mat plus chrZ_pat
+# -- so the contig names match our genome without translation.
+REPEAT_TE_BED        = "resources/repeats/bTaeGut7v0.4_MT_rDNA.matZ.EDTA2.v0.2.bed"
+REPEAT_SATELLITE_BED = "resources/repeats/bTaeGut7v0.4_MT_rDNA.matZ.Satellites.bed"
+
+# Which 1-based column carries the class name, from the awk commands in
+# resources/README: `awk '{print $5}'` on EDTA2, `awk '{print $4}'` on
+# Satellites.
+REPEAT_TE_COLUMN        = 5
+REPEAT_SATELLITE_COLUMN = 4
+
+# The third repeat annotation, bTaeGut7v0.4_MT_rDNA.matZ.TRF_withMers.bed, is
+# deliberately absent. Its two label columns are a Tandem Repeat Finder period
+# bin and the exact period of the repeat unit -- "11-50mer" plus "43-mer" means
+# TRF called a 43 bp unit there -- so its classes are unit LENGTHS, not repeat
+# families, and they overlap the satellite families rather than adding a class
+# of their own. Adding it later is a third split rule with column 4 and its own
+# class list; nothing else in this phase changes.
+
+# Transposable element and other EDTA2 classes, hardcoded from the class counts
+# in resources/README so the whole DAG resolves at parse time. Five of these
+# are not transposable elements at all -- low_complexity, repeat_fragment,
+# repeat_region, target_site_duplication and rRNA_gene -- and are kept because
+# they are annotated territory that PDAL-Seq reads can land in, and dropping a
+# class from a comparison is a decision that should be made after seeing it.
+# Seven classes have fewer than 200 records; see the note on the empirical
+# p-value in Compile_repeat_enrichment.R.
+TE_CLASSES = [
+    "5S_SINE_retrotransposon",
+    "CACTA_TIR_transposon",
+    "Copia_LTR_retrotransposon",
+    "CR1_LINE_retrotransposon",
+    "DNA_transposon",
+    "Endogenous_Retrovirus_LTR_retrotransposon",
+    "Gypsy_LTR_retrotransposon",
+    "hAT_TIR_transposon",
+    "helitron",
+    "Kolobok_TIR_transposon",
+    "long_terminal_repeat",
+    "low_complexity",
+    "LTR_retrotransposon",
+    "MIR_SINE_retrotransposon",
+    "Mutator_TIR_transposon",
+    "Ngaro_YR_retrotransposon",
+    "PIF_Harbinger_TIR_transposon",
+    "repeat_fragment",
+    "repeat_region",
+    "Retrovirus_LTR_retrotransposon",
+    "rRNA_gene",
+    "satellite_DNA",
+    "SINE_element",
+    "target_site_duplication",
+    "Tc1_Mariner_TIR_transposon",
+    "tRNA_SINE_retrotransposon",
+]
+
+# Satellite families, hardcoded from the same listing. This is 54 classes: the
+# telomeric repeat plus 53 Tgut families. (resources/README says "There are
+# also 50"; the listing under it has 54 entries.) Most have one or two
+# annotations, so most of their enrichments rest on a handful of loci -- the
+# record count is carried through to the output tables and onto the figures'
+# axis labels for exactly that reason.
+SATELLITE_CLASSES = [
+    "TEL",
+    "Tgut100A", "Tgut107A", "Tgut1205A", "Tgut1277A", "Tgut1435A",
+    "Tgut153A", "Tgut159A", "Tgut159B", "Tgut165A", "Tgut166B",
+    "Tgut167A", "Tgut171A", "Tgut174A", "Tgut176B", "Tgut176C",
+    "Tgut177A", "Tgut179A", "Tgut179B", "Tgut182A", "Tgut184A",
+    "Tgut185A", "Tgut186A", "Tgut188A", "Tgut188B", "Tgut189A",
+    "Tgut189B", "Tgut189C", "Tgut191A", "Tgut191B", "Tgut195A",
+    "Tgut198A", "Tgut202A", "Tgut260A", "Tgut269A", "Tgut282A",
+    "Tgut357A", "Tgut362A", "Tgut364A", "Tgut368A", "Tgut380A",
+    "Tgut382A", "Tgut420A", "Tgut450A", "Tgut458A", "Tgut507A",
+    "Tgut540A", "Tgut586A", "Tgut606A", "Tgut61B", "Tgut717A",
+    "Tgut717B", "Tgut81A", "Tgut939A",
+]
+
+# Every record of an annotation pooled into one class. The manuscript had no
+# equivalent; it is here because 80 families each resting on a few loci need a
+# line to be read against, and because "are PDAL-Seq reads enriched in
+# satellites" is the question the per-family panel is an answer to the details
+# of.
+TE_ALL        = "all_TE"
+SATELLITE_ALL = "all_Satellite"
+
+# The centromere annotation, one record per chromosome. CENTROMERE_BED is
+# defined in the Phase 4 block above.
+CENTROMERE_CLASS = "CEN"
+
+REPEAT_CLASSES = (TE_CLASSES + SATELLITE_CLASSES
+                  + [TE_ALL, SATELLITE_ALL, CENTROMERE_CLASS])
+
+REPEAT_CLASS_DIR = "data/phase5/repeat_classes"
+
+# The window grid the annotations are clipped to before subsampling. Same
+# 1 kbp grid Phase 3 built, reused rather than rebuilt -- the file is an input
+# here, not an output, so nothing in Phase 3 is recomputed.
+REPEAT_WINDOW = HMM_WINDOW
+
+# Sampling, from the manuscript's rule 17 calls: 1,000 fragments per iteration,
+# 100 iterations. Both differ from Phase 4's numbers because the manuscript
+# used different numbers for this analysis than for the HMM one, and the
+# subsample size is also the threshold that selects the significance test --
+# see Compile_repeat_enrichment.R.
+PHASE5_SUBSAMPLES = "1000"
+PHASE5_ITERATIONS = "100"
+
+####################################################################
+# Wildcard constraints
+#
+# Sample names contain "-" (e.g. 20mM-1), so the sample constraint must
+# allow it. Constraining {size} and {mapq} keeps them from swallowing
+# path separators when a rule matches several directory levels.
+####################################################################
+
+wildcard_constraints:
+    sample = "[A-Za-z0-9._-]+",
+    size   = "[0-9]+",
+    mapq   = "All_reads|High_MapQ",
+    genome = "[A-Za-z0-9._-]+",
+    # Exact alternation, longest first: "Tguttata_CFS414_PDALSeq" is a
+    # prefix of "Tguttata_CFS414_PDALSeq_20mM", so a greedy character class
+    # could match the wrong experiment.
+    experiment = "|".join(sorted(EXPERIMENT_NAMES, key=len, reverse=True)),
+    nonb = "|".join(NONB_ALL),
+    states = "[0-9]+",
+    # {states} is a model's state COUNT and {state} is one state within it.
+    # Every path that carries both separates them with the literal "state_",
+    # so the identical pattern is not ambiguous.
+    state = "[0-9]+",
+    ann = "|".join(sorted(ANNOTATIONS, key=len, reverse=True)),
+    sra = "|".join(RNA_SRA),
+    # Class names are plain identifiers with no separators in them, but
+    # "Tgut189A" is a prefix of nothing while "TEL" and "all_TE" share
+    # no prefix either way -- longest first anyway, for the same reason as
+    # {experiment}.
+    repeat_class = "|".join(sorted(REPEAT_CLASSES, key=len, reverse=True)),
+
+####################################################################
+# Targets
+####################################################################
+
+rule all:
+    input:
+        # Phase 1 -- preprocessing statistics
+        "results/phase1/Preprocessing_statistics.csv",
+        # Phase 1 -- pairwise correlation between datasets
+        "results/phase1/Window_coverage_correlation.csv",
+        expand("results/phase1/Window_coverage_{size}_CPM.csv", size=[PRIMARY_WINDOW]),
+        "plots/phase1/Correlation_heatmap.svg",
+        # Phase 1 -- browser tracks and BAM indices for eyeballing signal
+        # and for Phase 2 to pick up
+        expand("data/phase1/bigwig/{sample}.bigwig", sample=SAMPLES),
+        expand("data/phase1/{mapq}/{sample}.bam.bai", mapq=MAPQ, sample=SAMPLES),
+        # Phase 2 -- merged experiment BAMs
+        expand("data/phase2/{mapq}/{experiment}.bam.bai",
+               mapq=MAPQ, experiment=EXPERIMENT_NAMES),
+        # Phase 2 -- blacklist of unmappable regions (deferred from Phase 1)
+        "results/phase2/Blacklist.bed",
+        # Phase 2 -- read density versus non-B DNA motif density
+        "results/phase2/nonB_annotation_report.txt",
+        "results/phase2/nonB_correlation_coefficient.csv",
+        "results/phase2/nonB_coverage_versus_read.csv",
+        "plots/phase2/nonB_correlation_heatmap.svg",
+        "plots/phase2/nonB_scatter.svg",
+        # Phase 2 including repetitive -- the same comparison with nothing
+        # filtered out, so the multi-mapping repeats are in it
+        "results/phase2_including_repetative/nonB_correlation_coefficient.csv",
+        "results/phase2_including_repetative/nonB_coverage_versus_read.csv",
+        "results/phase2_including_repetative/Region_composition.csv",
+        "plots/phase2_including_repetative/nonB_correlation_heatmap.svg",
+        "plots/phase2_including_repetative/nonB_correlation_delta.svg",
+        "plots/phase2_including_repetative/nonB_scatter.svg",
+        # Phase 3 -- how many HMM states does the signal support?
+        "results/phase3/HMM_BIC.csv",
+        "results/phase3/Kmeans_scree.csv",
+        "results/phase3/HMM_state_summary.csv",
+        "plots/phase3/HMM_BIC_scree.svg",
+        "plots/phase3/Kmeans_scree.svg",
+        "plots/phase3/HMM_model_vs_empirical_means.svg",
+        # Phase 3 -- are the fitted Gaussians describing the signal?
+        expand("plots/phase3/gaussian_fit/{states}_states.svg", states=HMM_STATES),
+        # Phase 4 -- what do the states mean? One set of answers per k in
+        # PHASE4_STATES, so the models can be compared side by side.
+        "results/phase4/Annotation_report.txt",
+        "results/phase4/Segmented_genome.bed",
+        "results/phase4/RNA_seq_mapping_statistics.txt",
+        expand("results/phase4/{states}/State_summary.csv", states=PHASE4_STATES),
+        expand("results/phase4/{states}/State_by_chromosome.csv", states=PHASE4_STATES),
+        expand("results/phase4/{states}/nonB_enrichment.csv", states=PHASE4_STATES),
+        expand("results/phase4/{states}/Functional_enrichment.csv", states=PHASE4_STATES),
+        expand("results/phase4/{states}/RNA_enrichment.csv", states=PHASE4_STATES),
+        expand("results/phase4/{states}/Methylation_by_state.csv", states=PHASE4_STATES),
+        expand("plots/phase4/{states}/HMM_functional_summary.svg", states=PHASE4_STATES),
+        expand("plots/phase4/{states}/State_distribution_by_chromosome.svg",
+               states=PHASE4_STATES),
+        # Phase 5 -- PDAL-Seq versus control read density in repeats. No
+        # blacklist, no MAPQ filter, whole genome: the repeats are the subject
+        # here, and every filter in this pipeline removes them.
+        "results/phase5/Repeat_annotation_report.txt",
+        "results/phase5/Repeat_enrichment.csv",
+        "results/phase5/PDALSeq_versus_control.csv",
+        "plots/phase5/Repeat_enrichment_heatmap.svg",
+        "plots/phase5/PDALSeq_versus_control.svg",
+
+####################################################################
+# Rules
+####################################################################
+
+include: "rules/phase1_preprocess_and_correlate.smk"
+include: "rules/phase2_merge_and_nonb.smk"
+include: "rules/phase2_including_repetative.smk"
+include: "rules/phase3_hmm_states.smk"
+include: "rules/phase4_state_function.smk"
+include: "rules/phase5_repeat_enrichment.smk"

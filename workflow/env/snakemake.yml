@@ -1,0 +1,25 @@
+# Driver environment: the one that submit_phase1.sh activates before calling
+# snakemake. The per-rule envs are created by snakemake --use-conda.
+#
+# conda is pinned here ON PURPOSE. Roar's `module load anaconda` provides
+# conda 4.11.0, and snakemake 8 refuses to build rule environments with
+# anything older than 24.7.1:
+#
+#   CreateCondaEnvironmentException: Conda must be version 24.7.1 or later,
+#   found version 4.11.0.
+#
+# Installing conda into this environment is the fix snakemake itself
+# recommends -- once the env is activated its bin/ comes first on PATH, so
+# snakemake finds the new conda and the module's old one is never touched.
+# mamba is here only to make the per-rule env solves faster.
+name: js4025_snakemake
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - snakemake=8.25.5
+  - snakemake-executor-plugin-cluster-generic
+  - conda>=24.7.1
+  - mamba
+  - graphviz
